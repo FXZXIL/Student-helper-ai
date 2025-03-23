@@ -1,0 +1,7 @@
+# This file is used internally by FFMPEG.
+file 'file:C:/Users/hp/Desktop/studentai/media/videos/animation/480p15/partial_movie_files/BoltExample/1185818338_1168246596_223132457.mp4'
+file 'file:C:/Users/hp/Desktop/studentai/media/videos/animation/480p15/partial_movie_files/BoltExample/624642324_4071516364_1711331174.mp4'
+file 'file:C:/Users/hp/Desktop/studentai/media/videos/animation/480p15/partial_movie_files/BoltExample/624642324_350764199_708684180.mp4'
+file 'file:C:/Users/hp/Desktop/studentai/media/videos/animation/480p15/partial_movie_files/BoltExample/624642324_4071516364_3699744673.mp4'
+file 'file:C:/Users/hp/Desktop/studentai/media/videos/animation/480p15/partial_movie_files/BoltExample/624642324_1776142743_2198338288.mp4'
+file 'file:C:/Users/hp/Desktop/studentai/media/videos/animation/480p15/partial_movie_files/BoltExample/624642324_4247107814_146231957.mp4'

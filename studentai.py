@@ -13,13 +13,13 @@ import pandas as pd
 import plotly.express as px
 from io import StringIO
 import time
-from deep_translator import GoogleTranslator  # Updated import
+from deep_translator import GoogleTranslator
 
 # File paths
 JSON_FILE_PATH = "C:/Users/hp/Downloads/student_finetune.json"
 HISTORY_FILE_PATH = "C:/Users/hp/Downloads/student_history.json"
 
-# Language dictionaries
+# Language dictionaries (unchanged)
 translations = {
     "en": {
         "title": "Student.AI - Learn Easy",
@@ -109,6 +109,10 @@ def load_conversation_history():
             with open(HISTORY_FILE_PATH, "r", encoding="utf-8") as file:
                 data = json.load(file)
                 student_info = {**default_info, **data.get("student_info", {})}
+                # Migrate old quiz_history entries to include score
+                for entry in student_info["quiz_history"]:
+                    if "score" not in entry:
+                        entry["score"] = 1.0 if entry.get("correct", False) else 0.0
                 for task in student_info["study_plan"]:
                     task["subject"] = task.get("subject", "Unknown")
                     task["date"] = task.get("date", datetime.now().strftime("%Y-%m-%d"))
@@ -152,13 +156,15 @@ if "quiz_state" not in st.session_state:
 if "language" not in st.session_state:
     st.session_state.language = "en"
 
-# Language selector
-language_options = {"English": "en", "മലയാളം": "ml"}
-st.session_state.language = st.sidebar.selectbox("Select Language / ഭാഷ തിരഞ്ഞെടുക്കുക", list(language_options.keys()), index=0 if st.session_state.language == "en" else 1)
-lang = language_options[st.session_state.language]
+# Language selector in sidebar
+with st.sidebar:
+    st.header("Settings" if st.session_state.language == "en" else "ക്രമീകരണങ്ങൾ")
+    language_options = {"English": "en", "മലയാളം": "ml"}
+    st.session_state.language = st.selectbox("Select Language / ഭാഷ തിരഞ്ഞെടുക്കുക", list(language_options.keys()), index=0 if st.session_state.language == "en" else 1)
+    lang = language_options[st.session_state.language]
 
 # Translator setup
-translator = GoogleTranslator(source='auto', target='ml')  # Updated to deep_translator
+translator = GoogleTranslator(source='auto', target='ml')
 
 # Get CPU model
 def get_cpu_model():
@@ -225,7 +231,7 @@ def generate_llm_response(prompt, context=None):
         english_response = response['message']['content'] + "\nStep (Final): Hope that helps you learn!"
         if lang == "ml":
             malayalam_response = translator.translate(english_response)
-            return malayalam_response.replace("Step", "ഘട്ടം")  # Consistent translation
+            return malayalam_response.replace("Step", "ഘട്ടം")
         return english_response
     except Exception as e:
         return f"Error: {str(e)}" if lang == "en" else f"പിശക്: {str(e)}"
@@ -245,7 +251,7 @@ def generate_quiz(subject=None, difficulty="Medium"):
     except:
         default_q = "What is 2 + 2?" if lang == "en" else "2 + 2 എന്താണ്?"
         default_a = "4" if lang == "en" else "നാല്"
-        return default_q, default_a, "Math", "Easy"  # Fallback
+        return default_q, default_a, "Math", "Easy"
 
 # Generate multiple quiz questions for mock test with adaptive difficulty
 def generate_mock_test(num_questions, difficulty="Medium"):
@@ -255,10 +261,10 @@ def generate_mock_test(num_questions, difficulty="Medium"):
     difficulties = []
     
     if not history_df.empty:
-        recent_performance = history_df.tail(5)["correct"].mean()
-        if recent_performance > 0.8 and difficulty_map[difficulty] < 2:
+        recent_performance = history_df.tail(10)["correct"].mean()  # Use last 10 for better accuracy
+        if recent_performance > 0.75 and difficulty_map[difficulty] < 2:
             difficulty = "Hard"
-        elif recent_performance < 0.5 and difficulty_map[difficulty] > 0:
+        elif recent_performance < 0.4 and difficulty_map[difficulty] > 0:
             difficulty = "Easy"
     
     questions, answers, quiz_subjects = [], [], []
@@ -317,7 +323,7 @@ def save_history_after_interaction(query, response):
     st.session_state.messages.append({"role": "assistant", "content": response})
     save_conversation_history(st.session_state.messages, st.session_state.student_info)
 
-# Generate enhanced study plan
+# Generate enhanced study plan with performance weighting
 def generate_study_plan(deadlines, tasks_per_subject):
     study_plan = []
     today = datetime.now()
@@ -329,6 +335,13 @@ def generate_study_plan(deadlines, tasks_per_subject):
         "Quiz Prep": "Test yourself with sample questions" if lang == "en" else "സാമ്പിൾ ചോദ്യങ്ങളുമായി സ്വയം പരീക്ഷിക്കുക"
     }
     
+    history_df = pd.DataFrame(st.session_state.student_info["quiz_history"])
+    subject_weights = {subject: 1.0 for subject in st.session_state.student_info["subjects"]}
+    if not history_df.empty:
+        performance = history_df.groupby("subject")["correct"].mean()
+        for subject in subject_weights:
+            subject_weights[subject] = 1.5 - (performance.get(subject, 0.5) * 0.5)  # Lower performance = higher weight
+    
     all_tasks = []
     for subject, deadline_str in deadlines.items():
         try:
@@ -337,7 +350,8 @@ def generate_study_plan(deadlines, tasks_per_subject):
             if days_left <= 0:
                 continue
             task_list = tasks_per_subject.get(subject, ["Review Notes", "Practice Problems"])
-            for task in task_list:
+            weighted_tasks = task_list * int(subject_weights.get(subject, 1.0) * 2)  # More tasks for weaker subjects
+            for task in weighted_tasks:
                 all_tasks.append((subject, task, deadline, days_left))
         except ValueError:
             st.error(f"Invalid deadline format for {subject}. Use YYYY-MM-DD." if lang == "en" else f"{subject}-ന് തെറ്റായ അവസാന തീയതി ഫോർമാറ്റ്. YYYY-MM-DD ഉപയോഗിക്കുക.")
@@ -373,253 +387,288 @@ def generate_study_plan(deadlines, tasks_per_subject):
     study_plan.sort(key=lambda x: (x["date"], x["start_time"]))
     return study_plan
 
-# Simple UI with custom CSS
+# Enhanced UI with custom CSS
 st.markdown("""
     <style>
-        .correct { color: green; }
-        .wrong { color: red; }
+        .correct { color: green; font-weight: bold; }
+        .wrong { color: red; font-weight: bold; }
         .calendar-table { border-collapse: collapse; width: 100%; }
-        .calendar-table th, .calendar-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        .calendar-table th { background-color: #f2f2f2; }
+        .calendar-table th, .calendar-table td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        .calendar-table th { background-color: #f2f2f2; font-size: 16px; }
+        .stButton>button { width: 100%; }
+        .stTextInput>div>input { width: 100%; }
     </style>
 """, unsafe_allow_html=True)
 
+# Main layout with header
 st.title(translations[lang]["title"])
-st.write(translations[lang]["subtitle"])
+st.caption(translations[lang]["subtitle"])
 
-# Student profile
-col1, col2 = st.columns(2)
-with col1:
-    st.session_state.student_info["grade"] = st.selectbox(translations[lang]["grade_label"], ["8", "9", "10", "11", "12", "College"], index=["8", "9", "10", "11", "12", "College"].index(st.session_state.student_info.get("grade", "10")))
-with col2:
-    subjects_en = ["Math", "Science", "History", "English"]
-    subjects_ml = ["ഗണിതം", "ശാസ്ത്രം", "ചരിത്രം", "ഇംഗ്ലീഷ്"]
-    subjects_display = subjects_ml if lang == "ml" else subjects_en
-    selected_subjects = st.multiselect(translations[lang]["subjects_label"], subjects_display, default=[subjects_display[subjects_en.index(s)] for s in st.session_state.student_info.get("subjects", ["Math", "Science"])])
-    st.session_state.student_info["subjects"] = [subjects_en[subjects_display.index(s)] for s in selected_subjects]
+# Student profile in a container
+with st.container():
+    st.subheader("Profile" if lang == "en" else "പ്രൊഫൈൽ")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state.student_info["grade"] = st.selectbox(translations[lang]["grade_label"], ["8", "9", "10", "11", "12", "College"], index=["8", "9", "10", "11", "12", "College"].index(st.session_state.student_info.get("grade", "10")))
+    with col2:
+        subjects_en = ["Math", "Science", "History", "English"]
+        subjects_ml = ["ഗണിതം", "ശാസ്ത്രം", "ചരിത്രം", "ഇംഗ്ലീഷ്"]
+        subjects_display = subjects_ml if lang == "ml" else subjects_en
+        selected_subjects = st.multiselect(translations[lang]["subjects_label"], subjects_display, default=[subjects_display[subjects_en.index(s)] for s in st.session_state.student_info.get("subjects", ["Math", "Science"])])
+        st.session_state.student_info["subjects"] = [subjects_en[subjects_display.index(s)] for s in selected_subjects]
 
 # Tabs for navigation
 tab1, tab2, tab3, tab4 = st.tabs([translations[lang]["study_tab"], translations[lang]["quiz_tab"], translations[lang]["results_tab"], translations[lang]["plan_tab"]])
 
+# Study Tab
 with tab1:
-    query = st.text_input(translations[lang]["ask_placeholder"], placeholder=translations[lang]["ask_placeholder"])
-    if st.button(translations[lang]["answer_button"]):
-        if query:
-            response = retrieve_and_blend_answer(query)
-            st.markdown(f"**{'You Asked' if lang == 'en' else 'നീ ചോദിച്ചത്'}:** {query}")
-            st.markdown(response)
-            save_history_after_interaction(query, response)
-    if st.button(translations[lang]["tip_button"]):
-        response = generate_llm_response("Give me a simple study tip in numbered steps.")
-        st.markdown(f"**{'Study Tip' if lang == 'en' else 'പഠന നുറുങ്ങ്'}:**")
-        st.markdown(response)
-        save_history_after_interaction("study tip", response)
-
-with tab2:
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button(translations[lang]["single_quiz_button"]):
-            q, a, s, d = generate_quiz(difficulty="Medium")
-            st.session_state.quiz_state = {"questions": [q], "answers": [a], "subjects": [s], "difficulties": [d], "current": 0, "mock_test": False, "timer_start": time.time(), "time_limit": 30}
-            st.markdown(f"**{'Quiz Question (Medium)' if lang == 'en' else 'ക്വിസ് ചോദ്യം (മീഡിയം)'}:** {st.session_state.quiz_state['questions'][0]}")
-    with col2:
-        num_questions = st.slider(translations[lang]["num_questions_label"], 1, 10, 3)
-        difficulty_options = ["Easy", "Medium", "Hard"] if lang == "en" else ["എളുപ്പം", "മീഡിയം", "കഠിനം"]
-        difficulty = st.selectbox(translations[lang]["difficulty_label"], difficulty_options, index=1)
-        difficulty_en = ["Easy", "Medium", "Hard"][difficulty_options.index(difficulty)]
-        if st.button(translations[lang]["mock_test_button"]):
-            questions, answers, subjects, difficulties = generate_mock_test(num_questions, difficulty_en)
-            st.session_state.quiz_state = {"questions": questions, "answers": answers, "subjects": subjects, "difficulties": difficulties, "current": 0, "mock_test": True, "timer_start": time.time(), "time_limit": num_questions * 30}
-            st.markdown(f"**{'Mock Test Question 1' if lang == 'en' else 'മോക്ക് ടെസ്റ്റ് ചോദ്യം 1'} ({difficulties[0]}):** {st.session_state.quiz_state['questions'][0]}")
-
-    # Quiz answer input with timer
-    if st.session_state.quiz_state["questions"] and st.session_state.quiz_state["current"] < len(st.session_state.quiz_state["questions"]):
-        current = st.session_state.quiz_state["current"]
-        elapsed_time = time.time() - st.session_state.quiz_state["timer_start"]
-        time_left = max(0, st.session_state.quiz_state["time_limit"] - int(elapsed_time))
-        timer_placeholder = st.empty()
-        timer_placeholder.write(f"{'Time Left' if lang == 'en' else 'സമയം ബാക്കി'}: {time_left} {'seconds' if lang == 'en' else 'സെക്കന്റുകൾ'}")
-
-        if time_left <= 0:
-            st.error("Time’s up! Moving to next question." if lang == "en" else "സമയം കഴിഞ്ഞു! അടുത്ത ചോദ്യത്തിലേക്ക് നീങ്ങുന്നു.")
-            st.session_state.quiz_state["current"] += 1
-            if st.session_state.quiz_state["current"] >= len(st.session_state.quiz_state["questions"]):
-                st.session_state.quiz_state = {"questions": [], "answers": [], "subjects": [], "difficulties": [], "current": 0, "mock_test": False, "timer_start": None, "time_limit": 0}
-                st.success("Mock Test Complete!" if lang == "en" else "മോക്ക് ടെസ്റ്റ് പൂർത്തിയായി!")
-            else:
-                st.session_state.quiz_state["timer_start"] = time.time()
-            st.rerun()
-
-        student_answer = st.text_input(f"{'Your Answer (Question' if lang == 'en' else 'നിന്റെ ഉത്തരം (ചോദ്യം'} {current + 1}, {st.session_state.quiz_state['difficulties'][current]}):", key=f"quiz_answer_input_{current}")
-        if st.button(translations[lang]["submit_answer"]):
-            correct_answer = st.session_state.quiz_state["answers"][current].lower()
-            is_correct = student_answer.lower().strip() == correct_answer
-            if is_correct:
-                st.success("Correct! Great job!" if lang == "en" else "ശരി! മികച്ച പ്രവർത്തനം!")
-                st.session_state.student_info["quiz_score"] += 1
-            else:
-                st.error(f"{'Wrong. The correct answer was' if lang == 'en' else 'തെറ്റ്. ശരിയായ ഉത്തരം'}: {st.session_state.quiz_state['answers'][current]}")
-            st.session_state.student_info["quiz_total"] += 1
-            st.session_state.student_info["quiz_history"].append({
-                "question": st.session_state.quiz_state["questions"][current],
-                "student_answer": student_answer,
-                "correct_answer": st.session_state.quiz_state["answers"][current],
-                "correct": is_correct,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "subject": st.session_state.quiz_state["subjects"][current],
-                "difficulty": st.session_state.quiz_state["difficulties"][current]
-            })
-            save_conversation_history(st.session_state.messages, st.session_state.student_info)
-            st.session_state.quiz_state["current"] += 1
-            if st.session_state.quiz_state["current"] >= len(st.session_state.quiz_state["questions"]):
-                st.session_state.quiz_state = {"questions": [], "answers": [], "subjects": [], "difficulties": [], "current": 0, "mock_test": False, "timer_start": None, "time_limit": 0}
-                st.success("Mock Test Complete!" if lang == "en" else "മോക്ക് ടെസ്റ്റ് പൂർത്തിയായി!" if st.session_state.quiz_state["mock_test"] else "ക്വിസ് പൂർത്തിയായി!")
-            else:
-                st.session_state.quiz_state["timer_start"] = time.time()
-            st.rerun()
-
-with tab3:
-    score = st.session_state.student_info["quiz_score"]
-    total = st.session_state.student_info["quiz_total"]
-    percentage = score / total * 100 if total > 0 else 0.0
-    st.write(f"**{'Overall Progress' if lang == 'en' else 'മൊത്തം പുരോഗതി'}:** {score}/{total} {'correct' if lang == 'en' else 'ശരി'} ({percentage:.1f}%)")
-    st.progress(percentage / 100)
-    
-    if percentage >= 80:
-        st.success("Excellent work! You’re a quiz master!" if lang == "en" else "മികച്ച പ്രവർത്തനം! നീ ഒരു ക്വിസ് മാസ്റ്റർ ആണ്!")
-    elif percentage >= 50:
-        st.info("Good effort! Keep practicing to improve!" if lang == "en" else "നല്ല ശ്രമം! മെച്ചപ്പെടുത്താൻ പരിശീലനം തുടരുക!")
-    else:
-        st.warning("Don’t give up! Let’s try those tough ones again!" if lang == "en" else "നിരാശപ്പെടരുത്! ബുദ്ധിമുട്ടുള്ളവ വീണ്ടും ശ്രമിക്കാം!")
-
-    if st.session_state.student_info["quiz_history"]:
-        history_df = pd.DataFrame(st.session_state.student_info["quiz_history"])
-        subject_summary = history_df.groupby("subject").agg({"correct": ["sum", "count"]}).reset_index()
-        subject_summary.columns = ["Subject", "Correct", "Total"]
-        subject_summary["Percentage"] = (subject_summary["Correct"] / subject_summary["Total"] * 100).round(1)
-        st.write(f"**{'Performance by Subject' if lang == 'en' else 'വിഷയം അനുസരിച്ചുള്ള പ്രകടനം'}:**")
-        st.dataframe(subject_summary)
-
-        fig = px.bar(subject_summary, x="Subject", y="Percentage", title="Quiz Performance by Subject" if lang == "en" else "വിഷയം അനുസരിച്ച് ക്വിസ് പ്രകടനം", range_y=[0, 100])
-        st.plotly_chart(fig)
-
-        with st.expander("Detailed Quiz History" if lang == "en" else "വിശദമായ ക്വിസ് ചരിത്രം"):
-            for i, entry in enumerate(st.session_state.student_info["quiz_history"], 1):
-                status_class = "correct" if entry["correct"] else "wrong"
-                subject = entry.get("subject", "Unknown")
-                timestamp = entry.get("timestamp", "Not recorded")
-                difficulty = entry.get("difficulty", "Unknown")
-                st.markdown(
-                    f"<span class='{status_class}'>{i}. **{'Q' if lang == 'en' else 'ചോ'}:** {entry['question']} | **{'Your Answer' if lang == 'en' else 'നിന്റെ ഉത്തരം'}:** {entry['student_answer']} | "
-                    f"**{'Correct Answer' if lang == 'en' else 'ശരിയായ ഉത്തരം'}:** {entry['correct_answer']} | **{'Subject' if lang == 'en' else 'വിഷയം'}:** {subject} | **{'Difficulty' if lang == 'en' else 'കാഠിന്യം'}:** {difficulty} | "
-                    f"**{'Time' if lang == 'en' else 'സമയം'}:** {timestamp}</span>",
-                    unsafe_allow_html=True
-                )
-
-        incorrect = [entry for entry in st.session_state.student_info["quiz_history"] if not entry["correct"]]
-        if incorrect and st.button("Retry Incorrect Questions" if lang == "en" else "തെറ്റായ ചോദ്യങ്ങൾ വീണ്ടും ശ്രമിക്കുക"):
-            questions = [entry["question"] for entry in incorrect]
-            answers = [entry["correct_answer"] for entry in incorrect]
-            subjects = [entry.get("subject", "Unknown") for entry in incorrect]
-            difficulties = [entry.get("difficulty", "Unknown") for entry in incorrect]
-            st.session_state.quiz_state = {"questions": questions, "answers": answers, "subjects": subjects, "difficulties": difficulties, "current": 0, "mock_test": True, "timer_start": time.time(), "time_limit": len(incorrect) * 30}
-            st.markdown(f"**{'Retry Question 1' if lang == 'en' else 'വീണ്ടും ശ്രമിക്കുക ചോദ്യം 1'}:** {st.session_state.quiz_state['questions'][0]}")
-            st.rerun()
-
-        if st.button("Export Quiz History as CSV" if lang == "en" else "ക്വിസ് ചരിത്രം CSV ആയി എക്സ്പോർട്ട് ചെയ്യുക"):
-            csv = history_df.to_csv(index=False)
-            st.download_button("Download CSV" if lang == "en" else "CSV ഡൗൺലോഡ് ചെയ്യുക", csv, "quiz_history.csv", "text/csv")
-
-    if st.button("Reset Quiz Results" if lang == "en" else "ക്വിസ് ഫലങ്ങൾ പുനഃസജ്ജമാക്കുക"):
-        st.session_state.student_info["quiz_score"] = 0
-        st.session_state.student_info["quiz_total"] = 0
-        st.session_state.student_info["quiz_history"] = []
-        save_conversation_history(st.session_state.messages, st.session_state.student_info)
-        st.rerun()
-
-with tab4:
-    st.write(f"**{translations[lang]['plan_tab']}**")
-    
-    deadlines = {}
-    tasks_per_subject = {}
-    task_options_en = ["Review Notes", "Practice Problems", "Watch Video", "Quiz Prep"]
-    task_options_ml = ["നോട്ടുകൾ പരിശോധിക്കുക", "പ്രശ്നങ്ങൾ പരിശീലിക്കുക", "വീഡിയോ കാണുക", "ക്വിസ് തയ്യാറാക്കുക"]
-    task_options = task_options_ml if lang == "ml" else task_options_en
-    
-    for subject in st.session_state.student_info["subjects"]:
-        subject_display = subjects_ml[subjects_en.index(subject)] if lang == "ml" else subject
-        st.subheader(f"{subject_display} {'Plan' if lang == 'en' else 'പദ്ധതി'}")
+    with st.container():
+        st.subheader(translations[lang]["study_tab"])
+        query = st.text_input(translations[lang]["ask_placeholder"], placeholder=translations[lang]["ask_placeholder"])
         col1, col2 = st.columns(2)
         with col1:
-            deadline = st.date_input(f"{'Deadline for' if lang == 'en' else 'അവസാന തീയതി'} {subject_display}", min_value=datetime.now(), key=f"deadline_{subject}")
-            deadlines[subject] = deadline.strftime("%Y-%m-%d")
+            if st.button(translations[lang]["answer_button"]):
+                if query:
+                    response = retrieve_and_blend_answer(query)
+                    st.markdown(f"**{'You Asked' if lang == 'en' else 'നീ ചോദിച്ചത്'}:** {query}")
+                    st.markdown(response)
+                    save_history_after_interaction(query, response)
         with col2:
-            tasks = st.multiselect(f"{'Tasks for' if lang == 'en' else 'ടാസ്കുകൾ'} {subject_display}", task_options, default=[task_options[0], task_options[1]], key=f"tasks_{subject}")
-            tasks_per_subject[subject] = [task_options_en[task_options.index(t)] for t in tasks]
-    
-    if st.button(translations[lang]["generate_plan"]):
-        st.session_state.student_info["study_plan"] = generate_study_plan(deadlines, tasks_per_subject)
-        save_conversation_history(st.session_state.messages, st.session_state.student_info)
-        st.rerun()
+            if st.button(translations[lang]["tip_button"]):
+                response = generate_llm_response("Give me a simple study tip in numbered steps.")
+                st.markdown(f"**{'Study Tip' if lang == 'en' else 'പഠന നുറുങ്ങ്'}:**")
+                st.markdown(response)
+                save_history_after_interaction("study tip", response)
 
-    if st.session_state.student_info["study_plan"]:
-        plan_df = pd.DataFrame(st.session_state.student_info["study_plan"])
-        required_columns = {"subject", "date", "task", "details", "start_time", "duration", "completed"}
-        if not plan_df.empty and all(col in plan_df.columns for col in required_columns):
-            total_duration = plan_df["duration"].sum()
-            completed_duration = plan_df[plan_df["completed"]]["duration"].sum()
-            completed_tasks = len(plan_df[plan_df["completed"]])
-            st.write(f"**{translations[lang]['progress']}:** {completed_tasks}/{len(plan_df)} {'tasks completed' if lang == 'en' else 'ടാസ്കുകൾ പൂർത്തിയായി'} | {completed_duration}/{total_duration} {'minutes done' if lang == 'en' else 'മിനിറ്റുകൾ ചെയ്തു'}")
-            st.progress(completed_duration / total_duration if total_duration > 0 else 0)
+# Quiz/Test Tab
+with tab2:
+    with st.container():
+        st.subheader(translations[lang]["quiz_tab"])
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(translations[lang]["single_quiz_button"]):
+                q, a, s, d = generate_quiz(difficulty="Medium")
+                st.session_state.quiz_state = {"questions": [q], "answers": [a], "subjects": [s], "difficulties": [d], "current": 0, "mock_test": False, "timer_start": time.time(), "time_limit": 30}
+                st.markdown(f"**{'Quiz Question (Medium)' if lang == 'en' else 'ക്വിസ് ചോദ്യം (മീഡിയം)'}:** {st.session_state.quiz_state['questions'][0]}")
+        with col2:
+            num_questions = st.slider(translations[lang]["num_questions_label"], 1, 10, 3)
+            difficulty_options = ["Easy", "Medium", "Hard"] if lang == "en" else ["എളുപ്പം", "മീഡിയം", "കഠിനം"]
+            difficulty = st.selectbox(translations[lang]["difficulty_label"], difficulty_options, index=1)
+            difficulty_en = ["Easy", "Medium", "Hard"][difficulty_options.index(difficulty)]
+            if st.button(translations[lang]["mock_test_button"]):
+                questions, answers, subjects, difficulties = generate_mock_test(num_questions, difficulty_en)
+                st.session_state.quiz_state = {"questions": questions, "answers": answers, "subjects": subjects, "difficulties": difficulties, "current": 0, "mock_test": True, "timer_start": time.time(), "time_limit": num_questions * 30}
+                st.markdown(f"**{'Mock Test Question 1' if lang == 'en' else 'മോക്ക് ടെസ്റ്റ് ചോദ്യം 1'} ({difficulties[0]}):** {st.session_state.quiz_state['questions'][0]}")
 
-            st.write(f"**{translations[lang]['daily_schedule']}:**")
-            dates = sorted(plan_df["date"].unique())
-            html_table = f"<table class='calendar-table'><tr><th>{'Date' if lang == 'en' else 'തീയതി'}</th><th>{'Tasks' if lang == 'en' else 'ടാസ്കുകൾ'}</th></tr>"
-            for date in dates:
-                tasks_for_date = plan_df[plan_df["date"] == date]
-                tasks_html = "<br>".join([
-                    f"{'☑' if row['completed'] else '☐'} {row['start_time']} - {task_options_ml[task_options_en.index(row['task'])] if lang == 'ml' else row['task']} ({subjects_ml[subjects_en.index(row['subject'])] if lang == 'ml' else row['subject']}) - {row['duration']} {'mins' if lang == 'en' else 'മിനിറ്റ്'}: {row['details']}"
-                    for _, row in tasks_for_date.iterrows()
-                ])
-                html_table += f"<tr><td>{date}</td><td>{tasks_html if tasks_html else 'No tasks scheduled' if lang == 'en' else 'ഷെഡ്യൂൾ ചെയ്ത ടാസ്കുകൾ ഇല്ല'}</td></tr>"
-            html_table += "</table>"
-            st.markdown(html_table, unsafe_allow_html=True)
+        # Quiz answer input with timer
+        if st.session_state.quiz_state["questions"] and st.session_state.quiz_state["current"] < len(st.session_state.quiz_state["questions"]):
+            current = st.session_state.quiz_state["current"]
+            elapsed_time = time.time() - st.session_state.quiz_state["timer_start"]
+            time_left = max(0, st.session_state.quiz_state["time_limit"] - int(elapsed_time))
+            with st.container():
+                st.write(f"**{'Question' if lang == 'en' else 'ചോദ്യം'} {current + 1}/{len(st.session_state.quiz_state['questions'])} ({st.session_state.quiz_state['difficulties'][current]})**: {st.session_state.quiz_state['questions'][current]}")
+                timer_placeholder = st.empty()
+                timer_placeholder.write(f"{'Time Left' if lang == 'en' else 'സമയം ബാക്കി'}: {time_left} {'seconds' if lang == 'en' else 'സെക്കന്റുകൾ'}")
 
-            st.write(f"**{translations[lang]['mark_complete']}:**")
-            for i, task in plan_df.iterrows():
-                task_key = f"task_{task['date']}_{i}"
-                completed = st.checkbox(
-                    f"{task['date']} {task['start_time']} - {task_options_ml[task_options_en.index(task['task'])] if lang == 'ml' else task['task']} ({subjects_ml[subjects_en.index(task['subject'])] if lang == 'ml' else task['subject']}) - {task['duration']} {'mins' if lang == 'en' else 'മിനിറ്റ്'}: {task['details']}", 
-                    value=task["completed"], 
-                    key=task_key
-                )
-                if completed != task["completed"]:
-                    st.session_state.student_info["study_plan"][i]["completed"] = completed
-                    save_conversation_history(st.session_state.messages, st.session_state.student_info)
+                if time_left <= 0:
+                    st.error("Time’s up! Moving to next question." if lang == "en" else "സമയം കഴിഞ്ഞു! അടുത്ത ചോദ്യത്തിലേക്ക് നീങ്ങുന്നു.")
+                    st.session_state.quiz_state["current"] += 1
+                    if st.session_state.quiz_state["current"] >= len(st.session_state.quiz_state["questions"]):
+                        st.session_state.quiz_state = {"questions": [], "answers": [], "subjects": [], "difficulties": [], "current": 0, "mock_test": False, "timer_start": None, "time_limit": 0}
+                        st.success("Mock Test Complete!" if lang == "en" else "മോക്ക് ടെസ്റ്റ് പൂർത്തിയായി!")
+                    else:
+                        st.session_state.quiz_state["timer_start"] = time.time()
                     st.rerun()
 
-            progress_df = pd.DataFrame({
-                "Status": ["Completed", "Remaining"] if lang == "en" else ["പൂർത്തിയായി", "ബാക്കി"],
-                "Minutes": [completed_duration, total_duration - completed_duration]
-            })
-            fig = px.pie(progress_df, values="Minutes", names="Status", title="Study Plan Progress" if lang == "en" else "പഠന പദ്ധതി പുരോഗതി")
+                student_answer = st.text_input(f"{'Your Answer' if lang == 'en' else 'നിന്റെ ഉത്തരം'}", key=f"quiz_answer_input_{current}")
+                if st.button(translations[lang]["submit_answer"]):
+                    correct_answer = st.session_state.quiz_state["answers"][current].lower()
+                    student_answer_normalized = student_answer.lower().strip()
+                    similarity = cosine_similarity(vectorizer.transform([student_answer_normalized]), vectorizer.transform([correct_answer]))[0][0] if student_answer else 0.0
+                    score = 1.0 if student_answer_normalized == correct_answer else (0.5 if similarity > 0.8 else 0.0)  # Partial credit for close answers
+                    is_correct = score == 1.0
+                    
+                    if is_correct:
+                        st.success("Correct! Great job!" if lang == "en" else "ശരി! മികച്ച പ്രവർത്തനം!")
+                    elif score > 0:
+                        st.warning(f"Partially correct! Correct answer: {st.session_state.quiz_state['answers'][current]}" if lang == "en" else f"ഭാഗികമായി ശരി! ശരിയായ ഉത്തരം: {st.session_state.quiz_state['answers'][current]}")
+                    else:
+                        st.error(f"Wrong. Correct answer: {st.session_state.quiz_state['answers'][current]}" if lang == "en" else f"തെറ്റ്. ശരിയായ ഉത്തരം: {st.session_state.quiz_state['answers'][current]}")
+                    
+                    st.session_state.student_info["quiz_score"] += score
+                    st.session_state.student_info["quiz_total"] += 1
+                    st.session_state.student_info["quiz_history"].append({
+                        "question": st.session_state.quiz_state["questions"][current],
+                        "student_answer": student_answer,
+                        "correct_answer": st.session_state.quiz_state["answers"][current],
+                        "correct": is_correct,
+                        "score": score,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "subject": st.session_state.quiz_state["subjects"][current],
+                        "difficulty": st.session_state.quiz_state["difficulties"][current]
+                    })
+                    save_conversation_history(st.session_state.messages, st.session_state.student_info)
+                    st.session_state.quiz_state["current"] += 1
+                    if st.session_state.quiz_state["current"] >= len(st.session_state.quiz_state["questions"]):
+                        st.session_state.quiz_state = {"questions": [], "answers": [], "subjects": [], "difficulties": [], "current": 0, "mock_test": False, "timer_start": None, "time_limit": 0}
+                        st.success("Mock Test Complete!" if lang == "en" else "മോക്ക് ടെസ്റ്റ് പൂർത്തിയായി!" if st.session_state.quiz_state["mock_test"] else "ക്വിസ് പൂർത്തിയായി!")
+                    else:
+                        st.session_state.quiz_state["timer_start"] = time.time()
+                    st.rerun()
+
+# Results Tab
+with tab3:
+    with st.container():
+        st.subheader(translations[lang]["results_tab"])
+        score = st.session_state.student_info["quiz_score"]
+        total = st.session_state.student_info["quiz_total"]
+        percentage = score / total * 100 if total > 0 else 0.0
+        st.metric(f"{'Overall Score' if lang == 'en' else 'മൊത്തം സ്കോർ'}", f"{score:.1f}/{total} ({percentage:.1f}%)")
+        st.progress(percentage / 100)
+        
+        if percentage >= 80:
+            st.success("Excellent work! You’re a quiz master!" if lang == "en" else "മികച്ച പ്രവർത്തനം! നീ ഒരു ക്വിസ് മാസ്റ്റർ ആണ്!")
+        elif percentage >= 50:
+            st.info("Good effort! Keep practicing to improve!" if lang == "en" else "നല്ല ശ്രമം! മെച്ചപ്പെടുത്താൻ പരിശീലനം തുടരുക!")
+        else:
+            st.warning("Don’t give up! Let’s try those tough ones again!" if lang == "en" else "നിരാശപ്പെടരുത്! ബുദ്ധിമുട്ടുള്ളവ വീണ്ടും ശ്രമിക്കാം!")
+
+        if st.session_state.student_info["quiz_history"]:
+            history_df = pd.DataFrame(st.session_state.student_info["quiz_history"])
+            # Ensure 'score' exists, default to 1.0 or 0.0 based on 'correct' if missing
+            if "score" not in history_df.columns:
+                history_df["score"] = history_df["correct"].apply(lambda x: 1.0 if x else 0.0)
+            subject_summary = history_df.groupby("subject").agg({"score": "sum", "correct": "count"}).reset_index()
+            subject_summary.columns = ["Subject", "Score", "Total"]
+            subject_summary["Percentage"] = (subject_summary["Score"] / subject_summary["Total"] * 100).round(1)
+            st.write(f"**{'Performance by Subject' if lang == 'en' else 'വിഷയം അനുസരിച്ചുള്ള പ്രകടനം'}:**")
+            st.dataframe(subject_summary)
+
+            fig = px.bar(subject_summary, x="Subject", y="Percentage", title="Quiz Performance by Subject" if lang == "en" else "വിഷയം അനുസരിച്ച് ക്വിസ് പ്രകടനം", range_y=[0, 100])
             st.plotly_chart(fig)
 
-            next_task = plan_df[~plan_df["completed"]].iloc[0] if not plan_df["completed"].all() else None
-            if next_task is not None:
-                st.info(f"**{translations[lang]['next_step']}:** {'On' if lang == 'en' else 'നിന്ന്'} {next_task['date']} {'at' if lang == 'en' else 'ന്'} {next_task['start_time']}, {task_options_ml[task_options_en.index(next_task['task'])] if lang == 'ml' else next_task['task']} {'for' if lang == 'en' else 'ന്'} {subjects_ml[subjects_en.index(next_task['subject'])] if lang == 'ml' else next_task['subject']} ({next_task['details']})")
+            with st.expander("Detailed Quiz History" if lang == "en" else "വിശദമായ ക്വിസ് ചരിത്രം"):
+                for i, entry in enumerate(st.session_state.student_info["quiz_history"], 1):
+                    status_class = "correct" if entry["correct"] else "wrong"
+                    subject = entry.get("subject", "Unknown")
+                    timestamp = entry.get("timestamp", "Not recorded")
+                    difficulty = entry.get("difficulty", "Unknown")
+                    score = entry.get("score", 1.0 if entry["correct"] else 0.0)  # Fallback for old entries
+                    st.markdown(
+                        f"<span class='{status_class}'>{i}. **{'Q' if lang == 'en' else 'ചോ'}:** {entry['question']} | **{'Your Answer' if lang == 'en' else 'നിന്റെ ഉത്തരം'}:** {entry['student_answer']} | "
+                        f"**{'Correct Answer' if lang == 'en' else 'ശരിയായ ഉത്തരം'}:** {entry['correct_answer']} | **{'Score' if lang == 'en' else 'സ്കോർ'}:** {score:.1f} | "
+                        f"**{'Subject' if lang == 'en' else 'വിഷയം'}:** {subject} | **{'Difficulty' if lang == 'en' else 'കാഠിന്യം'}:** {difficulty} | **{'Time' if lang == 'en' else 'സമയം'}:** {timestamp}</span>",
+                        unsafe_allow_html=True
+                    )
+
+            incorrect = [entry for entry in st.session_state.student_info["quiz_history"] if entry.get("score", 1.0 if entry["correct"] else 0.0) < 1.0]
+            if incorrect and st.button("Retry Incorrect Questions" if lang == "en" else "തെറ്റായ ചോദ്യങ്ങൾ വീണ്ടും ശ്രമിക്കുക"):
+                questions = [entry["question"] for entry in incorrect]
+                answers = [entry["correct_answer"] for entry in incorrect]
+                subjects = [entry.get("subject", "Unknown") for entry in incorrect]
+                difficulties = [entry.get("difficulty", "Unknown") for entry in incorrect]
+                st.session_state.quiz_state = {"questions": questions, "answers": answers, "subjects": subjects, "difficulties": difficulties, "current": 0, "mock_test": True, "timer_start": time.time(), "time_limit": len(incorrect) * 30}
+                st.markdown(f"**{'Retry Question 1' if lang == 'en' else 'വീണ്ടും ശ്രമിക്കുക ചോദ്യം 1'}:** {st.session_state.quiz_state['questions'][0]}")
+                st.rerun()
+
+            if st.button("Export Quiz History as CSV" if lang == "en" else "ക്വിസ് ചരിത്രം CSV ആയി എക്സ്പോർട്ട് ചെയ്യുക"):
+                csv = history_df.to_csv(index=False)
+                st.download_button("Download CSV" if lang == "en" else "CSV ഡൗൺലോഡ് ചെയ്യുക", csv, "quiz_history.csv", "text/csv")
+
+        if st.button("Reset Quiz Results" if lang == "en" else "ക്വിസ് ഫലങ്ങൾ പുനഃസജ്ജമാക്കുക"):
+            st.session_state.student_info["quiz_score"] = 0
+            st.session_state.student_info["quiz_total"] = 0
+            st.session_state.student_info["quiz_history"] = []
+            save_conversation_history(st.session_state.messages, st.session_state.student_info)
+            st.rerun()
+
+# Study Plan Tab
+with tab4:
+    with st.container():
+        st.subheader(translations[lang]["plan_tab"])
+        
+        deadlines = {}
+        tasks_per_subject = {}
+        task_options_en = ["Review Notes", "Practice Problems", "Watch Video", "Quiz Prep"]
+        task_options_ml = ["നോട്ടുകൾ പരിശോധിക്കുക", "പ്രശ്നങ്ങൾ പരിശീലിക്കുക", "വീഡിയോ കാണുക", "ക്വിസ് തയ്യാറാക്കുക"]
+        task_options = task_options_ml if lang == "ml" else task_options_en
+        
+        with st.expander("Set Deadlines and Tasks" if lang == "en" else "അവസാന തീയതികളും ടാസ്കുകളും സജ്ജമാക്കുക"):
+            for subject in st.session_state.student_info["subjects"]:
+                subject_display = subjects_ml[subjects_en.index(subject)] if lang == "ml" else subject
+                st.write(f"**{subject_display}**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    deadline = st.date_input(f"{'Deadline for' if lang == 'en' else 'അവസാന തീയതി'} {subject_display}", min_value=datetime.now(), key=f"deadline_{subject}")
+                    deadlines[subject] = deadline.strftime("%Y-%m-%d")
+                with col2:
+                    tasks = st.multiselect(f"{'Tasks for' if lang == 'en' else 'ടാസ്കുകൾ'} {subject_display}", task_options, default=[task_options[0], task_options[1]], key=f"tasks_{subject}")
+                    tasks_per_subject[subject] = [task_options_en[task_options.index(t)] for t in tasks]
+        
+        if st.button(translations[lang]["generate_plan"]):
+            st.session_state.student_info["study_plan"] = generate_study_plan(deadlines, tasks_per_subject)
+            save_conversation_history(st.session_state.messages, st.session_state.student_info)
+            st.rerun()
+
+        if st.session_state.student_info["study_plan"]:
+            plan_df = pd.DataFrame(st.session_state.student_info["study_plan"])
+            required_columns = {"subject", "date", "task", "details", "start_time", "duration", "completed"}
+            if not plan_df.empty and all(col in plan_df.columns for col in required_columns):
+                total_duration = plan_df["duration"].sum()
+                completed_duration = plan_df[plan_df["completed"]]["duration"].sum()
+                completed_tasks = len(plan_df[plan_df["completed"]])
+                st.metric(f"{translations[lang]['progress']}", f"{completed_tasks}/{len(plan_df)} {'tasks' if lang == 'en' else 'ടാസ്കുകൾ'} | {completed_duration}/{total_duration} {'mins' if lang == 'en' else 'മിനിറ്റ്'}")
+                st.progress(completed_duration / total_duration if total_duration > 0 else 0)
+
+                st.write(f"**{translations[lang]['daily_schedule']}:**")
+                dates = sorted(plan_df["date"].unique())
+                html_table = f"<table class='calendar-table'><tr><th>{'Date' if lang == 'en' else 'തീയതി'}</th><th>{'Tasks' if lang == 'en' else 'ടാസ്കുകൾ'}</th></tr>"
+                for date in dates:
+                    tasks_for_date = plan_df[plan_df["date"] == date]
+                    tasks_html = "<br>".join([ 
+                        f"{'☑' if row['completed'] else '☐'} {row['start_time']} - {task_options_ml[task_options_en.index(row['task'])] if lang == 'ml' else row['task']} ({subjects_ml[subjects_en.index(row['subject'])] if lang == 'ml' else row['subject']}) - {row['duration']} {'mins' if lang == 'en' else 'മിനിറ്റ്'}: {row['details']}"
+                        for _, row in tasks_for_date.iterrows()
+                    ])
+                    html_table += f"<tr><td>{date}</td><td>{tasks_html if tasks_html else 'No tasks scheduled' if lang == 'en' else 'ഷെഡ്യൂൾ ചെയ്ത ടാസ്കുകൾ ഇല്ല'}</td></tr>"
+                html_table += "</table>"
+                st.markdown(html_table, unsafe_allow_html=True)
+
+                st.write(f"**{translations[lang]['mark_complete']}:**")
+                for i, task in plan_df.iterrows():
+                    task_key = f"task_{task['date']}_{i}"
+                    completed = st.checkbox(
+                        f"{task['date']} {task['start_time']} - {task_options_ml[task_options_en.index(task['task'])] if lang == 'ml' else task['task']} ({subjects_ml[subjects_en.index(task['subject'])] if lang == 'ml' else task['subject']}) - {task['duration']} {'mins' if lang == 'en' else 'മിനിറ്റ്'}: {task['details']}", 
+                        value=task["completed"], 
+                        key=task_key
+                    )
+                    if completed != task["completed"]:
+                        st.session_state.student_info["study_plan"][i]["completed"] = completed
+                        save_conversation_history(st.session_state.messages, st.session_state.student_info)
+                        st.rerun()
+
+                progress_df = pd.DataFrame({
+                    "Status": ["Completed", "Remaining"] if lang == "en" else ["പൂർത്തിയായി", "ബാക്കി"],
+                    "Minutes": [completed_duration, total_duration - completed_duration]
+                })
+                fig = px.pie(progress_df, values="Minutes", names="Status", title="Study Plan Progress" if lang == "en" else "പഠന പദ്ധതി പുരോഗതി")
+                st.plotly_chart(fig)
+
+                next_task = plan_df[~plan_df["completed"]].iloc[0] if not plan_df["completed"].all() else None
+                if next_task is not None:
+                    st.info(f"**{translations[lang]['next_step']}:** {'On' if lang == 'en' else 'നിന്ന്'} {next_task['date']} {'at' if lang == 'en' else 'ന്'} {next_task['start_time']}, {task_options_ml[task_options_en.index(next_task['task'])] if lang == 'ml' else next_task['task']} {'for' if lang == 'en' else 'ന്'} {subjects_ml[subjects_en.index(next_task['subject'])] if lang == 'ml' else next_task['subject']} ({next_task['details']})")
+                else:
+                    st.success(translations[lang]["all_complete"])
             else:
-                st.success(translations[lang]["all_complete"])
+                st.write(translations[lang]["invalid_plan"])
         else:
-            st.write(translations[lang]["invalid_plan"])
-    else:
-        st.write(translations[lang]["no_plan"])
+            st.write(translations[lang]["no_plan"])
 
 # Display last response
 if st.session_state.messages and not st.session_state.quiz_state["questions"]:
-    st.markdown("---")
-    st.write(f"**{'Last Question and Answer' if lang == 'en' else 'അവസാന ചോദ്യവും ഉത്തരവും'}:**")
-    last_query = st.session_state.messages[-2]["content"]
-    last_response = st.session_state.messages[-1]["content"]
-    st.markdown(f"**{'You Asked' if lang == 'en' else 'നീ ചോദിച്ചത്'}:** {last_query}")
-    st.markdown(last_response)
+    with st.container():
+        st.markdown("---")
+        st.subheader(f"{'Last Interaction' if lang == 'en' else 'അവസാന ഇടപെടൽ'}")
+        last_query = st.session_state.messages[-2]["content"]
+        last_response = st.session_state.messages[-1]["content"]
+        st.markdown(f"**{'You Asked' if lang == 'en' else 'നീ ചോദിച്ചത്'}:** {last_query}")
+        st.markdown(last_response)
